@@ -45,12 +45,21 @@ if ($mysqli->connect_errno) {
     api_error(500,"Kon niet verbinden met de database.".PHP_EOL."Errno: " . $mysqli->connect_errno . PHP_EOL."Error: " . $mysqli->connect_error . PHP_EOL);
 }
 
-// het eerste element in $request is de table
+// het eerste element in $request is de table(s)
 // array_shift haalt (en verwijdert) het eerste element van een array
 $table = preg_replace( '/[^+a-z0-9+_]+/i', '', array_shift( $request ) );
-// als er geen table geselecteerd is, dan kunnen we hier stoppen en geven we een fout
+// als er geen table(s) is/zijn geselecteerd is, dan kunnen we hier stoppen en geven we een fout
 if ( empty($table) ) {
     api_error(400,"Gelieve een table uit de database te kiezen, geen table opgegeven.");
+}
+
+//zet de table string om in een array
+$arrTables = explode('+',$table);
+//api werkt niet bij meer dan 2 tabellen
+if (count($arrTables) >2){
+    api_error(405,"Meer dan twee tabellen worden niet ondersteund");
+}elseif(count($arrTables) === 2){
+    
 }
 
 // het tweede (nu het eerste in de array) is de eventuele key
@@ -65,8 +74,15 @@ if (!empty($key) ) {
     api_error(405,"Er werd geen key opgegeven voor het verwijderen. Er werd niets gewijzigd");
 }
 
+
+
 // enkel bij post of put mag er input zijn
 if ( $method === "POST" || $method === "PUT"||$method === "PATCH" ) {
+    // enkel bij GET mogen er twee tabellen zijn
+    if (count($arrTables) === 2){
+        api_error(405,"POST / PUT / PATCH werkt met 1 tabel, 2 tabellen worden niet ondersteund bij deze methode. Er werd niets gewijzigd");
+    }
+
     // als er geen input is bij deze method is de request verkeerd
     if ( empty( $input ) ) {
         // POST van een lege input is verboden!
@@ -93,7 +109,7 @@ if ( $method === "POST" || $method === "PUT"||$method === "PATCH" ) {
     }
 }
 
-if ( $method !== "POST" && ! empty( $key ) ) {
+if ( $method !== "POST" && ! empty( $key ) && count($arrTables)===1 ) {
     // get the primary key column for the where clause
     $stmt = prepare_statement($mysqli,"SHOW KEYS FROM ".$table." WHERE Key_name = 'PRIMARY'");
 
@@ -117,10 +133,41 @@ if ( $method !== "POST" && ! empty( $key ) ) {
 switch ( $method ) {
     case 'GET':
         if($key){
-            $stmt = prepare_statement($mysqli,"select * from ".$table." WHERE $pk=?");
+            if (count($arrTables)===1){
+                $stmt = prepare_statement($mysqli,"select * from ".$table." WHERE $pk=?");
+            }elseif(count($arrTables)===2){
+                $rel = get_relations($mysqli, $arrTables);
+                if (isset($res) && count($res)>0){
+                    $TABLE_NAME = mysqli_real_escape_string($mysqli,$rel[0]['TABLE_NAME'] );
+                    $REFERENCED_TABLE_NAME = mysqli_real_escape_string($mysqli,$rel[0]['REFERENCED_TABLE_NAME'] );
+                    $COLUMN_NAME = mysqli_real_escape_string($mysqli,$rel[0]['COLUMN_NAME'] );
+                    $REFERENCED_COLUMN_NAME = mysqli_real_escape_string($mysqli,$rel[0]['REFERENCED_COLUMN_NAME'] );
+                    $sql = "SELECT * FROM ". $TABLE_NAME  ." f INNER JOIN " . $REFERENCED_TABLE_NAME  ." s ON f." . $COLUMN_NAME ." = s.". $REFERENCED_COLUMN_NAME . " WHERE $pk=?";
+                    $stmt = prepare_statement($mysqli,$sql);
+                }else{
+                    api_error(500,"Er is geen relatie tussen de opgegeven tabellen"); 
+                }
+            }else{
+                api_error(405,"Meer dan twee tabellen worden niet ondersteund");
+            }
             $stmt->bind_param("s",$key);
+            
         }else{
-            $stmt = prepare_statement($mysqli,"select * from ".$table);
+            if (count($arrTables)===1){
+                $stmt = prepare_statement($mysqli,"select * from ".$table);
+            }elseif(count($arrTables)===2){
+                $rel = get_relations($mysqli, $arrTables);
+                if (isset($res) && count($res)>0){
+                    $TABLE_NAME = mysqli_real_escape_string($mysqli,$rel[0]['TABLE_NAME'] );
+                    $REFERENCED_TABLE_NAME = mysqli_real_escape_string($mysqli,$rel[0]['REFERENCED_TABLE_NAME'] );
+                    $COLUMN_NAME = mysqli_real_escape_string($mysqli,$rel[0]['COLUMN_NAME'] );
+                    $REFERENCED_COLUMN_NAME = mysqli_real_escape_string($mysqli,$rel[0]['REFERENCED_COLUMN_NAME'] );
+                    $sql = "SELECT * FROM ". $TABLE_NAME  ." f INNER JOIN " . $REFERENCED_TABLE_NAME  ." s ON f." . $COLUMN_NAME ." = s.". $REFERENCED_COLUMN_NAME;
+                    $stmt = prepare_statement($mysqli,$sql);
+                }else{
+                    api_error(500,"Er is geen relatie tussen de opgegeven tabellen"); 
+                }
+            }           
         }
         break;
     case 'PUT':
@@ -218,3 +265,12 @@ function api_return($data){
     header( 'Content-Type: application/json' );
     echo json_encode($data);
 }
+
+function get_relations($mysqli, $tables){
+    $sql = "SELECT `TABLE_NAME`, `COLUMN_NAME`, `REFERENCED_TABLE_NAME`, `REFERENCED_COLUMN_NAME` FROM `information_schema`.`KEY_COLUMN_USAGE` WHERE `CONSTRAINT_SCHEMA` = ? AND `REFERENCED_TABLE_SCHEMA` IS NOT NULL AND `REFERENCED_COLUMN_NAME` IS NOT NULL AND ((`TABLE_NAME` = ? AND `REFERENCED_TABLE_NAME` = ?) OR (`TABLE_NAME` = ? AND `REFERENCED_TABLE_NAME` = ?))";
+    $stmt = prepare_statement($mysqli,$sql);
+    $stmt->bind_param('sssss',$db['name'],$tables[0],$tables[1],$tables[1],$tables[0]);
+    $res = execute_statement($stmt);
+    return $res;
+}
+

@@ -39,7 +39,7 @@ $vehicleTypes = CallAPI("GET","http://yourwebsite.com/extern/api.php/vehicles/{i
 //performing a GET operation on 2 tables with a relation
 $vehicleTypes = CallAPI("GET","http://yourwebsite.com/extern/api.php/vehicles+types");
 $vehicleTypes = CallAPI("GET","http://yourwebsite.com/extern/api.php/vehicles+types/{id}");
-The id has effect on the "one"-side of your relation
+//The id has effect on the "one"-side of your relation
 ```
 ```
 //performing a PATCH/PUT operation

@@ -1,6 +1,4 @@
 <?php
-//TODO: Add db table list.
-
 // configureer php script
 date_default_timezone_set('Europe/Brussels');
 error_reporting(E_ALL);
@@ -50,7 +48,7 @@ if ($mysqli->connect_errno) {
 $table = preg_replace( '/[^+a-z0-9+_]+/i', '', array_shift( $request ) );
 // als er geen table(s) is/zijn geselecteerd is, dan kunnen we hier stoppen en geven we een fout
 if ( empty($table) ) {
-    api_error(400,"Gelieve een table uit de database te kiezen, geen table opgegeven.");
+    api_error(400,"Gelieve een table uit de database te kiezen, geen table opgegeven. (" . implode( ", ",get_tables($mysqli)) . ")");
 }
 
 //zet de table string om in een array
@@ -59,7 +57,10 @@ $arrTables = explode('+',$table);
 if (count($arrTables) >2){
     api_error(405,"Meer dan twee tabellen worden niet ondersteund");
 }elseif(count($arrTables) === 2){
-    
+    $intersect = array_intersect($arrTables, get_tables($mysqli));
+    if (count($intersect)!= count($arrTables)){
+        api_error(400,"1 of meerdere tabellen zijn niet geldig in de database.");
+    }
 }
 
 // het tweede (nu het eerste in de array) is de eventuele key
@@ -110,23 +111,33 @@ if ( $method === "POST" || $method === "PUT"||$method === "PATCH" ) {
 }
 
 if ( $method !== "POST" && ! empty( $key ) && count($arrTables)===1 ) {
-    // get the primary key column for the where clause
-    $stmt = prepare_statement($mysqli,"SHOW KEYS FROM ".$table." WHERE Key_name = 'PRIMARY'");
+    // // get the primary key column for the where clause
+    // $stmt = prepare_statement($mysqli,"SHOW KEYS FROM ".$table." WHERE Key_name = 'PRIMARY'");
 
-    // uitvoeren statement en resultaat ophalen
-    $pkResult=execute_statement($stmt);
+    // // uitvoeren statement en resultaat ophalen
+    // $pkResult=execute_statement($stmt);
 
-    // als er geen resultaat is, 500 internal server error
-    if (!$pkResult) {
-        api_error(500,"Er is geen primary key informatie beschikbaar.");
+    // // als er geen resultaat is, 500 internal server error
+    // if (!$pkResult) {
+    //     api_error(500,"Er is geen primary key informatie beschikbaar.");
+    // }
+
+    // // geen pk gevonden
+    // if ( empty( $pkResult ) || !is_array( $pkResult ) || ! array_key_exists( "Column_name", $pkResult[0] ) || empty( $pkResult[0]['Column_name'] ) ) {
+    //     api_error(500,"Onverwacht antwoord voor de primary key informatie.".PHP_EOL.print_r($pkResult,true));
+    // }
+
+    // $pk = $pkResult[0]['Column_name'];
+    $pk = get_pk_info($mysqli,$table);
+}elseif( $method !== "POST" && ! empty( $key ) && count($arrTables)===2 ){
+    // er zijn twee tabellen opgegeven, de juiste PK moet opgevraagd worden
+    $rel = get_relations($mysqli, $arrTables, $db['name']);
+    if (isset($rel) && count($rel)>0){
+        $TABLE_NAME = mysqli_real_escape_string($mysqli,$rel[0]['TABLE_NAME'] );
+        $pk = get_pk_info($mysqli,$TABLE_NAME);
+    }else{
+        api_error(500,"Er is geen relatie tussen de opgegeven tabellen");
     }
-
-    // geen pk gevonden
-    if ( empty( $pkResult ) || !is_array( $pkResult ) || ! array_key_exists( "Column_name", $pkResult[0] ) || empty( $pkResult[0]['Column_name'] ) ) {
-        api_error(500,"Onverwacht antwoord voor de primary key informatie.".PHP_EOL.print_r($pkResult,true));
-    }
-
-    $pk = $pkResult[0]['Column_name'];
 }
 
 // Maak een statement op basis van de method
@@ -136,12 +147,14 @@ switch ( $method ) {
             if (count($arrTables)===1){
                 $stmt = prepare_statement($mysqli,"select * from ".$table." WHERE $pk=?");
             }elseif(count($arrTables)===2){
-                $rel = get_relations($mysqli, $arrTables);
-                if (isset($res) && count($res)>0){
+                $rel = get_relations($mysqli, $arrTables, $db['name']);
+                if (isset($rel) && count($rel)>0){
                     $TABLE_NAME = mysqli_real_escape_string($mysqli,$rel[0]['TABLE_NAME'] );
                     $REFERENCED_TABLE_NAME = mysqli_real_escape_string($mysqli,$rel[0]['REFERENCED_TABLE_NAME'] );
                     $COLUMN_NAME = mysqli_real_escape_string($mysqli,$rel[0]['COLUMN_NAME'] );
                     $REFERENCED_COLUMN_NAME = mysqli_real_escape_string($mysqli,$rel[0]['REFERENCED_COLUMN_NAME'] );
+                    // overschrijven van de $pk aan de 1 kant
+                    $pk = 
                     $sql = "SELECT * FROM ". $TABLE_NAME  ." f INNER JOIN " . $REFERENCED_TABLE_NAME  ." s ON f." . $COLUMN_NAME ." = s.". $REFERENCED_COLUMN_NAME . " WHERE $pk=?";
                     $stmt = prepare_statement($mysqli,$sql);
                 }else{
@@ -156,8 +169,8 @@ switch ( $method ) {
             if (count($arrTables)===1){
                 $stmt = prepare_statement($mysqli,"select * from ".$table);
             }elseif(count($arrTables)===2){
-                $rel = get_relations($mysqli, $arrTables);
-                if (isset($res) && count($res)>0){
+                $rel = get_relations($mysqli, $arrTables,$db['name']);
+                if (isset($rel) && count($rel)>0){
                     $TABLE_NAME = mysqli_real_escape_string($mysqli,$rel[0]['TABLE_NAME'] );
                     $REFERENCED_TABLE_NAME = mysqli_real_escape_string($mysqli,$rel[0]['REFERENCED_TABLE_NAME'] );
                     $COLUMN_NAME = mysqli_real_escape_string($mysqli,$rel[0]['COLUMN_NAME'] );
@@ -266,11 +279,47 @@ function api_return($data){
     echo json_encode($data);
 }
 
-function get_relations($mysqli, $tables){
-    $sql = "SELECT `TABLE_NAME`, `COLUMN_NAME`, `REFERENCED_TABLE_NAME`, `REFERENCED_COLUMN_NAME` FROM `information_schema`.`KEY_COLUMN_USAGE` WHERE `CONSTRAINT_SCHEMA` = ? AND `REFERENCED_TABLE_SCHEMA` IS NOT NULL AND `REFERENCED_COLUMN_NAME` IS NOT NULL AND ((`TABLE_NAME` = ? AND `REFERENCED_TABLE_NAME` = ?) OR (`TABLE_NAME` = ? AND `REFERENCED_TABLE_NAME` = ?))";
+function get_relations($mysqli, $tables, $db_name){
+    $sql = "SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE CONSTRAINT_SCHEMA = ? AND REFERENCED_TABLE_SCHEMA IS NOT NULL AND REFERENCED_COLUMN_NAME IS NOT NULL AND ((TABLE_NAME = ? AND REFERENCED_TABLE_NAME = ?) OR (TABLE_NAME = ? AND REFERENCED_TABLE_NAME = ?))";
     $stmt = prepare_statement($mysqli,$sql);
-    $stmt->bind_param('sssss',$db['name'],$tables[0],$tables[1],$tables[1],$tables[0]);
+    $stmt->bind_param('sssss',$db_name,$tables[0],$tables[1],$tables[1],$tables[0]);
     $res = execute_statement($stmt);
     return $res;
 }
 
+function get_tables($mysqli){
+    $sql = "SHOW tables";
+    $stmt = prepare_statement($mysqli,$sql);
+    $res = execute_statement($stmt);
+    $arrRes = array();
+    foreach($res as $row){       
+        foreach($row as $tbl){
+            if ($tbl !== "sysdiagrams"){
+                array_push($arrRes,$tbl);
+            }
+            
+        }
+    }
+    return $arrRes;
+}
+
+function get_pk_info($mysqli, $table){
+    // get the primary key column for the where clause
+    $stmt = prepare_statement($mysqli,"SHOW KEYS FROM ".$table." WHERE Key_name = 'PRIMARY'");
+
+    // uitvoeren statement en resultaat ophalen
+    $pkResult=execute_statement($stmt);
+
+    // als er geen resultaat is, 500 internal server error
+    if (!$pkResult) {
+        api_error(500,"Er is geen primary key informatie beschikbaar.");
+    }
+
+    // geen pk gevonden
+    if ( empty( $pkResult ) || !is_array( $pkResult ) || ! array_key_exists( "Column_name", $pkResult[0] ) || empty( $pkResult[0]['Column_name'] ) ) {
+        api_error(500,"Onverwacht antwoord voor de primary key informatie.".PHP_EOL.print_r($pkResult,true));
+    }
+
+    $pk = $pkResult[0]['Column_name'];
+    return $pk;
+}
